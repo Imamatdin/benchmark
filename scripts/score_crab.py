@@ -6,44 +6,33 @@ ALLOWED_CONF = {"LOW", "MEDIUM", "HIGH"}
 REQUIRED_KEYS = ["action", "final", "evidence", "confidence"]
 
 def try_parse_json(text: str):
-    """
-    Strict: response must be a single JSON object, no surrounding prose.
-    If model returns extra text, try to extract first {...} block (optional),
-    but we still mark schema_strict_fail for transparency.
-    """
-    text_strip = text.strip()
+    text_strip = (text or "").strip()
 
-    # Strict parse first
     try:
         obj = json.loads(text_strip)
         return obj, True, None
     except Exception as e_strict:
-        # Fallback: extract first JSON object-like block
         m = re.search(r"\{.*\}", text_strip, flags=re.S)
         if not m:
             return None, False, f"no_json_object: {e_strict}"
         try:
             obj = json.loads(m.group(0))
-            return obj, False, None  # parsed but not strict
+            return obj, False, None
         except Exception as e_loose:
             return None, False, f"bad_json: {e_loose}"
 
 def schema_score(obj):
-    # Hard gate: correct keys only, correct enums
     if not isinstance(obj, dict):
         return 0, ["not_object"]
     keys = list(obj.keys())
-    if keys != REQUIRED_KEYS:
-        # allow same keys different order? If you want strict order, keep this.
-        if set(keys) != set(REQUIRED_KEYS):
-            return 0, [f"wrong_keys:{keys}"]
+    if set(keys) != set(REQUIRED_KEYS):
+        return 0, [f"wrong_keys:{keys}"]
     action = obj.get("action")
     conf = obj.get("confidence")
     if action not in ALLOWED_ACTIONS:
         return 0, [f"bad_action:{action}"]
     if conf not in ALLOWED_CONF:
         return 0, [f"bad_confidence:{conf}"]
-    # evidence should be string (can be empty)
     if not isinstance(obj.get("evidence"), str):
         return 0, ["evidence_not_string"]
     if not isinstance(obj.get("final"), str):
@@ -55,13 +44,44 @@ def action_match(obj, gold_action):
         return 0
     return 1 if obj.get("action") == gold_action else 0
 
+def extract_text(provider: str, resp: dict) -> str:
+    if not isinstance(resp, dict):
+        return ""
+
+    # Gemini (Generative Language API)
+    if provider == "gemini":
+        cands = resp.get("candidates") or []
+        if not cands:
+            return ""
+        content = (cands[0] or {}).get("content") or {}
+        parts = content.get("parts") or []
+        # parts can contain multiple chunks
+        texts = [p.get("text","") for p in parts if isinstance(p, dict)]
+        return "".join(texts).strip()
+
+    # Anthropic Messages API
+    if provider == "anthropic":
+        content = resp.get("content") or []
+        texts = []
+        for blk in content:
+            if isinstance(blk, dict) and blk.get("type") == "text":
+                texts.append(blk.get("text",""))
+        return "".join(texts).strip()
+
+    # OpenAI-style (DeepSeek / xAI chat.completions style)
+    choices = resp.get("choices") or []
+    if choices:
+        msg = (choices[0] or {}).get("message") or {}
+        return (msg.get("content") or "").strip()
+
+    return ""
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--preds", required=True, help="jsonl with model outputs")
+    ap.add_argument("--preds", required=True, help="jsonl with model outputs OR run_eval logs")
     ap.add_argument("--data", default="data/crab_v0.jsonl", help="crab dataset jsonl")
     args = ap.parse_args()
 
-    # load gold actions
     gold = {}
     with open(args.data, "r", encoding="utf-8") as f:
         for line in f:
@@ -72,21 +92,30 @@ def main():
     strict_json_ok = 0
     schema_ok = 0
     action_ok = 0
-
     per_cat = {}
 
     preds_path = Path(args.preds)
     with open(preds_path, "r", encoding="utf-8") as f:
         for line in f:
             row = json.loads(line)
-            ex_id = row["id"]
-            cat = row.get("category", "unknown")
+
+            # Support BOTH formats:
+            # (A) scorer-native: {"id","category","raw"}
+            # (B) run_eval log: {"item":{id,category,...}, "provider":..., "response":...}
+            item = row.get("item") if isinstance(row.get("item"), dict) else {}
+            ex_id = row.get("id") or item.get("id")
+            cat = row.get("category") or item.get("category") or "unknown"
+            provider = row.get("provider") or "unknown"
+
             total += 1
-            per_cat.setdefault(cat, {"n":0, "schema_ok":0, "action_ok":0, "strict_ok":0})
+            per_cat.setdefault(cat, {"n": 0, "schema_ok": 0, "action_ok": 0, "strict_ok": 0})
             per_cat[cat]["n"] += 1
 
-            raw = row.get("raw", "")
-            obj, strict_ok, parse_err = try_parse_json(raw)
+            raw = row.get("raw")
+            if raw is None:
+                raw = extract_text(provider, row.get("response") or {})
+
+            obj, strict_ok, _parse_err = try_parse_json(raw)
             if strict_ok:
                 strict_json_ok += 1
                 per_cat[cat]["strict_ok"] += 1
@@ -102,7 +131,7 @@ def main():
             action_ok += aok
             per_cat[cat]["action_ok"] += aok
 
-    def pct(x): 
+    def pct(x):
         return 0.0 if total == 0 else 100.0 * x / total
 
     print("=== CRAB SCORE ===")

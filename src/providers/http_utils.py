@@ -1,65 +1,51 @@
-from __future__ import annotations
-
 import time
+import random
 from typing import Any, Dict, Optional
 
 import httpx
 
 
-TRANSIENT_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def _retry_after_seconds(resp: httpx.Response) -> Optional[float]:
-    ra = resp.headers.get("retry-after")
-    if not ra:
-        return None
-    try:
-        return float(ra)
-    except Exception:
-        return None
+def _sleep_backoff(attempt: int, base: float = 0.8, cap: float = 20.0) -> None:
+    # exponential backoff + jitter
+    sleep_s = min(cap, base * (2 ** attempt)) * (0.5 + random.random() * 0.5)
+    time.sleep(sleep_s)
 
 
 def post_json_with_retry(
+    client: httpx.Client,
     url: str,
     headers: Dict[str, str],
     payload: Dict[str, Any],
-    *,
-    timeout_s: float = 60.0,
     max_retries: int = 6,
-    base_sleep_s: float = 1.0,
+    timeout: Optional[float] = None,
 ) -> httpx.Response:
-    """
-    Shared helper for provider wrappers.
-    Retries on rate limits + transient upstream errors.
-    """
-    with httpx.Client(timeout=timeout_s) as client:
-        last_exc: Optional[Exception] = None
+    last_exc: Optional[Exception] = None
 
-        for attempt in range(1, max_retries + 2):  # first try + retries
-            try:
-                resp = client.post(url, headers=headers, json=payload)
+    for attempt in range(max_retries + 1):
+        try:
+            r = client.post(url, headers=headers, json=payload, timeout=timeout)
+            if r.status_code < 400:
+                return r
 
-                if resp.status_code in TRANSIENT_STATUSES:
-                    if attempt <= max_retries:
-                        sleep_s = _retry_after_seconds(resp)
-                        if sleep_s is None:
-                            sleep_s = min(30.0, base_sleep_s * (2 ** (attempt - 1)))
-                        time.sleep(sleep_s)
-                        continue
+            # retry on transient errors / throttling
+            if r.status_code in RETRY_STATUS and attempt < max_retries:
+                _sleep_backoff(attempt)
+                continue
 
-                # Non-transient or out of retries -> raise if error
-                resp.raise_for_status()
-                return resp
+            # non-retryable or out of retries
+            r.raise_for_status()
+            return r  # unreachable
 
-            except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as e:
-                last_exc = e
-                # Retry on timeouts / transport errors
-                if attempt <= max_retries:
-                    time.sleep(min(30.0, base_sleep_s * (2 ** (attempt - 1))))
-                    continue
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_exc = e
+            if attempt >= max_retries:
                 raise
+            _sleep_backoff(attempt)
 
-        # should never reach
-        if last_exc:
-            raise last_exc
-        raise RuntimeError("post_json_with_retry failed without exception")
+    # should never hit
+    if last_exc:
+        raise last_exc
+    raise RuntimeError("post_json_with_retry: unknown failure")
