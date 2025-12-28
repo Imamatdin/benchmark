@@ -1,6 +1,5 @@
-# Add project dependencies here
-# Example:
-# requests>=2.0
 python-dotenv==1.0.1
 httpx==0.27.2
 tqdm==4.66.5
+# Optional: used by scripts/build_gold_expect.py for mesh measurements
+trimesh==4.4.4

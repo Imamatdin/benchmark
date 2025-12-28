@@ -70,7 +70,8 @@ def sanitize_scad(text: str) -> Tuple[str, bool]:
       - extract first fenced block if present
       - strip leading "Here is..." style preamble lines
       - drop a lone '$' line (common truncation artifact)
-      - trim
+      - drop dangling garbage lines with only a special character
+      - trim trailing incomplete tokens so output ends on a sane delimiter
     Returns (clean_text, changed_flag)
     """
     orig = text
@@ -110,7 +111,27 @@ def sanitize_scad(text: str) -> Tuple[str, bool]:
         if re.match(r"^\s*\$\s*$", line):
             continue
         t3_lines.append(line)
+    # Remove trailing single-character garbage lines (common truncation artifacts)
+    while t3_lines:
+        m = re.match(r"^\s*([,;{}()\[\]])\s*$", t3_lines[-1])
+        if not m:
+            break
+        ch = m.group(1)
+        if ch in ("}", ")", "]"):
+            break
+        t3_lines.pop()
     t3 = "\n".join(t3_lines).strip()
+
+    # Trim trailing incomplete tokens (e.g., trailing '$' or '{')
+    while t3 and re.search(r"[\$,{[(]$", t3):
+        t3 = t3[:-1].rstrip()
+
+    # Ensure ending delimiter looks valid; if not, attempt to drop last line
+    if t3 and not re.search(r"[;})\)]\s*$", t3):
+        lines = t3.splitlines()
+        while lines and not re.search(r"[;})\)]\s*$", lines[-1]):
+            lines.pop()
+        t3 = "\n".join(lines).strip()
 
     changed = (t3 != orig.strip())
     return t3, changed
