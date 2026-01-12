@@ -8,7 +8,7 @@ import httpx
 RETRY_STATUS = {408, 409, 425, 429, 500, 502, 503, 504}
 
 
-def _sleep_backoff(attempt: int, base: float = 0.8, cap: float = 20.0) -> None:
+def _sleep_backoff(attempt: int, base: float = 2.0, cap: float = 60.0) -> None:
     # exponential backoff + jitter
     sleep_s = min(cap, base * (2 ** attempt)) * (0.5 + random.random() * 0.5)
     time.sleep(sleep_s)
@@ -32,10 +32,21 @@ def post_json_with_retry(
 
             # retry on transient errors / throttling
             if r.status_code in RETRY_STATUS and attempt < max_retries:
+                # Log the error details for debugging
+                try:
+                    error_body = r.json()
+                    print(f"\n[Retry {attempt+1}/{max_retries}] HTTP {r.status_code}: {error_body}")
+                except:
+                    print(f"\n[Retry {attempt+1}/{max_retries}] HTTP {r.status_code}: {r.text[:200]}")
                 _sleep_backoff(attempt)
                 continue
 
             # non-retryable or out of retries
+            print(f"\n[FAILED after {attempt+1} attempts] HTTP {r.status_code}")
+            try:
+                print(f"Error details: {r.json()}")
+            except:
+                print(f"Error text: {r.text[:500]}")
             r.raise_for_status()
             return r  # unreachable
 

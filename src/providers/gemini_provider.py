@@ -2,6 +2,7 @@ import os
 import json
 import httpx
 from typing import Any, Dict, List
+from .http_utils import post_json_with_retry
 
 # Correct Gemini Developer API base (AI Studio key works here)
 DEFAULT_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -55,7 +56,13 @@ class GeminiProvider:
 
         # If you later add flags like gemini_thinking_budget / gemini_force_json,
         # handle them here via kwargs.
-        with httpx.Client(timeout=90) as client:
-            r = client.post(url, json=payload, headers={})
-            r.raise_for_status()
+        with httpx.Client(timeout=120) as client:
+            r = post_json_with_retry(
+                client=client,
+                url=url,
+                headers={},
+                payload=payload,
+                max_retries=10,
+                timeout=120
+            )
             return r.json()
